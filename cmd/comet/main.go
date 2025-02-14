@@ -14,14 +14,23 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bilibili/discovery/naming"
-	resolver "github.com/bilibili/discovery/naming/grpc"
 	"github.com/Terry-Mao/goim/internal/comet"
 	"github.com/Terry-Mao/goim/internal/comet/conf"
 	"github.com/Terry-Mao/goim/internal/comet/grpc"
 	md "github.com/Terry-Mao/goim/internal/logic/model"
 	"github.com/Terry-Mao/goim/pkg/ip"
+	"github.com/google/uuid"
+
+	//resolver "github.com/bilibili/discovery/naming/grpc"
+	"google.golang.org/grpc/resolver"
+
+	//"github.com/go-kratos/kratos/contrib/registry/consul/v2"
+	consul "github.com/go-kratos/consul/registry"
+	"github.com/go-kratos/kratos/v2/registry"
+	"github.com/go-kratos/kratos/v2/transport/grpc/resolver/discovery"
+
 	log "github.com/golang/glog"
+	"github.com/hashicorp/consul/api"
 )
 
 const (
@@ -38,9 +47,20 @@ func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	println(conf.Conf.Debug)
 	log.Infof("goim-comet [version: %s env: %+v] start", ver, conf.Conf.Env)
+
 	// register discovery
-	dis := naming.New(conf.Conf.Discovery)
-	resolver.Register(dis)
+	//dis := naming.New(conf.Conf.Discovery)
+	//resolver.Register(dis)
+
+	// new consul client
+	client, err := api.NewClient(api.DefaultConfig())
+	if err != nil {
+		panic(err)
+	}
+	// new reg with consul client
+	reg := consul.New(client)
+	resolver.Register(discovery.NewBuilder(reg))
+
 	// new comet server
 	srv := comet.NewServer(conf.Conf)
 	if err := comet.InitWhitelist(conf.Conf.Whitelist); err != nil {
@@ -59,7 +79,7 @@ func main() {
 	}
 	// new grpc server
 	rpcSrv := grpc.New(conf.Conf.RPCServer, srv)
-	cancel := register(dis, srv)
+	cancel := register(reg, srv)
 	// signal
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, syscall.SIGHUP, syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGINT)
@@ -83,26 +103,24 @@ func main() {
 	}
 }
 
-func register(dis *naming.Discovery, srv *comet.Server) context.CancelFunc {
+func register(dis registry.Registrar, srv *comet.Server) context.CancelFunc {
 	env := conf.Conf.Env
 	addr := ip.InternalIP()
 	_, port, _ := net.SplitHostPort(conf.Conf.RPCServer.Addr)
-	ins := &naming.Instance{
-		Region:   env.Region,
-		Zone:     env.Zone,
-		Env:      env.DeployEnv,
-		Hostname: env.Host,
-		AppID:    appid,
-		Addrs: []string{
-			"grpc://" + addr + ":" + port,
-		},
+	ins := &registry.ServiceInstance{
+		ID:      uuid.New().String(),
+		Name:    appid,
+		Version: ver,
 		Metadata: map[string]string{
 			md.MetaWeight:  strconv.FormatInt(env.Weight, 10),
 			md.MetaOffline: strconv.FormatBool(env.Offline),
 			md.MetaAddrs:   strings.Join(env.Addrs, ","),
 		},
+		Endpoints: []string{
+			"grpc://" + addr + ":" + port,
+		},
 	}
-	cancel, err := dis.Register(ins)
+	err := dis.Register(context.Background(), ins)
 	if err != nil {
 		panic(err)
 	}
@@ -122,7 +140,7 @@ func register(dis *naming.Discovery, srv *comet.Server) context.CancelFunc {
 			}
 			ins.Metadata[md.MetaConnCount] = fmt.Sprint(conns)
 			ins.Metadata[md.MetaIPCount] = fmt.Sprint(len(ips))
-			if err = dis.Set(ins); err != nil {
+			if err = dis.Register(context.Background(), ins); err != nil {
 				log.Errorf("dis.Set(%+v) error(%v)", ins, err)
 				time.Sleep(time.Second)
 				continue
@@ -130,5 +148,9 @@ func register(dis *naming.Discovery, srv *comet.Server) context.CancelFunc {
 			time.Sleep(time.Second * 10)
 		}
 	}()
+
+	cancel := func() {
+		dis.Deregister(context.Background(), ins)
+	}
 	return cancel
 }

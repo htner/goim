@@ -6,12 +6,16 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/bilibili/discovery/naming"
-	"github.com/Terry-Mao/goim/internal/job"
 	"github.com/Terry-Mao/goim/internal/job/conf"
 
-	resolver "github.com/bilibili/discovery/naming/grpc"
+	"google.golang.org/grpc/resolver"
+
+	consul "github.com/go-kratos/consul/registry"
+	"github.com/go-kratos/kratos/v2/transport/grpc/resolver/discovery"
+
+	"github.com/Terry-Mao/goim/internal/job"
 	log "github.com/golang/glog"
+	"github.com/hashicorp/consul/api"
 )
 
 var (
@@ -24,9 +28,14 @@ func main() {
 		panic(err)
 	}
 	log.Infof("goim-job [version: %s env: %+v] start", ver, conf.Conf.Env)
-	// grpc register naming
-	dis := naming.New(conf.Conf.Discovery)
-	resolver.Register(dis)
+	// new consul client
+	client, err := api.NewClient(api.DefaultConfig())
+	if err != nil {
+		panic(err)
+	}
+	// new reg with consul client
+	reg := consul.New(client)
+	resolver.Register(discovery.NewBuilder(reg))
 	// job
 	j := job.New(conf.Conf)
 	go j.Consume()
